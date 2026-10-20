@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <!-- Web SDK only for two tiny endpoints (/healthz, /wake) used by the optional scale-to-zero mode. -->
+  <ItemGroup>
+    <ProjectReference Include="..\AudioBlog.Core\AudioBlog.Core.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+**/node_modules/
+web/
+tests/
+infra/
+.git/
+.vs/
+.vscode/
+.claude/
+*.md
