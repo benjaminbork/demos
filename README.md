@@ -17,6 +17,7 @@
 | 6 | Record whether it built and ran, plus errors and confusing setup | ✅ | [Two follow-ups needed](#step-6-what-worked-and-what-didnt), both about AI and Azure sign-in, none about Cosmos DB |
 | 7 | Enable or install the agent kit skills | ✅ | `cosmosdb-best-practices` installed into `.claude/skills` |
 | 8 | Ask the agent to review for Cosmos DB best practices | ✅ | [5 main suggestions + 4 minor](#step-8-what-the-cosmos-db-review-suggested) |
+| 9 | Measure the RU effect of the suggested query changes | ✅ | [1 / 5 / 10 physical partitions, 1,000 to 100,000 articles](#step-9-measuring-the-ru-effect-of-the-review) |
 
 ---
 
@@ -33,7 +34,7 @@
 | **App processes** | API, worker and frontend run locally with `dotnet run` and `npm run dev` |
 | **Machine prerequisites** | .NET 10 SDK, Node.js 22+, Docker Desktop, Azure CLI (`az login`), PowerShell 7 |
 
-The full Azure deployment (`infra/main.bicep`, `scripts/deploy.ps1`, with Container Apps, Static Web Apps and a real serverless Cosmos DB account) was generated, but it has **not** been deployed in this test. Everything Cosmos DB related ran against the emulator.
+The full Azure deployment (`infra/main.bicep`, `scripts/deploy.ps1`, with Container Apps, Static Web Apps and a real serverless Cosmos DB account) was generated, but it has **not** been deployed in this test. The app ran against the Cosmos DB emulator; only the RU measurements in [Step 9](#step-9-measuring-the-ru-effect-of-the-review) used a real Azure Cosmos DB account, created just for the test.
 
 ---
 
@@ -248,3 +249,237 @@ A fresh Claude Code session reviewed the baseline with the skill.
 - **Project fields in the list query.** `SELECT *` also returns `lease`, `dueAt`, `failure.detail` and step bookkeeping the DTO never uses. Small gain, mostly tidier.
 - **429 retry settings.** The values in [`CosmosSetup.cs`](src/AudioBlog.Core/Data/CosmosSetup.cs) equal the SDK defaults, so they change nothing. Harmless.
 - **Availability.** One region, no zone redundancy, no `ApplicationRegion`. Fine for a hobby app on serverless; if it grows, zone redundancy is the cheapest first step.
+
+## Step 9: Measuring the RU effect of the review
+
+The review's three query changes were measured against **real Azure Cosmos DB**, before (round 1) and after (round 2). The local emulator can't be used for this: it doesn't report request charges and doesn't apply the indexing policy.
+
+### Test setup
+
+| | |
+|---|---|
+| **Cosmos DB account** | Provisioned throughput (manual), single region West Europe, Entra ID only: [`infra/cosmos-partitions.bicep`](infra/cosmos-partitions.bicep) |
+| **Containers** | `p1` = 6,000 RU/s → **1** physical partition, `p5` = 30,000 RU/s → **5**, `p10` = 60,000 RU/s → **10**. A new container starts with RU/s ÷ 6,000 physical partitions. |
+| **Container definition** | Same partition key (`[/userId, /articleId]`) and indexing policy as the app's `articles` container: [`infra/modules/articles-container.bicep`](infra/modules/articles-container.bicep) |
+| **Test data** | Article items shaped like the app's (~1.5 KB), 1,000 / 10,000 / 100,000 per container |
+| **Data shapes** | **single**: all articles belong to one user (this app today; one partition key prefix → one physical partition). **many**: articles spread over 1,000 users (data in every physical partition). |
+| **Scenarios** | For the due sweep and pending check: none, one, 10 % and all articles made due (`dueAt` in the past) |
+| **Queries** | Before = the round-1 versions, after = the round-2 versions from [`CosmosArticleStore.cs`](src/AudioBlog.Core/Data/CosmosArticleStore.cs); both are verbatim in [`scripts/ru-test.cs`](scripts/ru-test.cs) |
+| **Measurement** | Request charge (RU) reported by Cosmos DB, summed over all pages of a query; median of 5 runs after one warm-up run. *Partitions hit* comes from the per-partition server-side query metrics. *Same result* checks that before and after returned the same answer. |
+| **Script** | [`scripts/ru-test.cs`](scripts/ru-test.cs) (.NET 10 file-based app): `dotnet run scripts/ru-test.cs -- --endpoint <cosmos endpoint>` |
+| **Run** | 2026-10-21, about 35 minutes. `p1` + `p5` and `p10` ran as two parallel processes; both reports were merged. |
+| **Cost** | About $15 (two started hours at 96,000 RU/s); the account was deleted afterwards |
+| **Full results file** | [`docs/ru-results/ru-test-partitions-20261021.md`](docs/ru-results/ru-test-partitions-20261021.md) |
+
+
+### Physical partitions holding data
+
+| Container | Physical partitions | Shape | Articles | Partitions with data |
+|---|---:|---|---:|---:|
+| p1 | 1 | single | 1,000 | 1 |
+| p1 | 1 | single | 10,000 | 1 |
+| p1 | 1 | single | 100,000 | 1 |
+| p1 | 1 | many | 1,000 | 1 |
+| p1 | 1 | many | 10,000 | 1 |
+| p1 | 1 | many | 100,000 | 1 |
+| p5 | 5 | single | 1,000 | 1 |
+| p5 | 5 | single | 10,000 | 1 |
+| p5 | 5 | single | 100,000 | 1 |
+| p5 | 5 | many | 1,000 | 5 |
+| p5 | 5 | many | 10,000 | 5 |
+| p5 | 5 | many | 100,000 | 5 |
+| p10 | 10 | single | 1,000 | 1 |
+| p10 | 10 | single | 10,000 | 1 |
+| p10 | 10 | single | 100,000 | 1 |
+| p10 | 10 | many | 1,000 | 10 |
+| p10 | 10 | many | 10,000 | 10 |
+| p10 | 10 | many | 100,000 | 10 |
+
+### 1. List articles, newest first (`ListArticlesAsync`)
+
+- **Before:** `... ORDER BY c.createdAt DESC`
+- **After:** `... ORDER BY c.userId ASC, c.type ASC, c.createdAt DESC`
+- Scoped to one user (partition key prefix). Runs on page load and every 2 s while an article is in progress. *Same result* = identical items in identical order.
+
+| Partitions | Shape | Articles | Scenario | Before RU | After RU | Saved RU | Saved % | Partitions hit | Same result |
+|---:|---|---:|---|---:|---:|---:|---:|:---:|:---:|
+| 1 | single | 1,000 | first page (≤100) | 23.63 | 10.56 | 13.07 | 55.3 % | 1 → 1 | ✓ |
+| 1 | single | 10,000 | first page (≤100) | 8.45 | 9.99 | -1.54 | -18.2 % | 1 → 1 | ✓ |
+| 1 | single | 100,000 | first page (≤100) | 7.62 | 7.79 | -0.17 | -2.2 % | 1 → 1 | ✓ |
+| 1 | many | 1,000 | first page (≤100) | 2.84 | 2.85 | -0.01 | -0.4 % | 1 → 1 | ✓ |
+| 1 | many | 10,000 | first page (≤100) | 3.25 | 3.29 | -0.04 | -1.2 % | 1 → 1 | ✓ |
+| 1 | many | 100,000 | first page (≤100) | 7.37 | 7.78 | -0.41 | -5.6 % | 1 → 1 | ✓ |
+| 5 | single | 1,000 | first page (≤100) | 23.63 | 10.21 | 13.42 | 56.8 % | 1 → 1 | ✓ |
+| 5 | single | 10,000 | first page (≤100) | 9.67 | 9.77 | -0.10 | -1.0 % | 1 → 1 | ✓ |
+| 5 | single | 100,000 | first page (≤100) | 7.62 | 7.78 | -0.16 | -2.1 % | 1 → 1 | ✓ |
+| 5 | many | 1,000 | first page (≤100) | 2.94 | 2.85 | 0.09 | 3.1 % | 1 → 1 | ✓ |
+| 5 | many | 10,000 | first page (≤100) | 3.35 | 3.30 | 0.05 | 1.5 % | 1 → 1 | ✓ |
+| 5 | many | 100,000 | first page (≤100) | 7.46 | 7.87 | -0.41 | -5.5 % | 1 → 1 | ✓ |
+| 10 | single | 1,000 | first page (≤100) | 7.60 | 7.77 | -0.17 | -2.2 % | 1 → 1 | ✓ |
+| 10 | single | 10,000 | first page (≤100) | 7.60 | 7.90 | -0.30 | -3.9 % | 1 → 1 | ✓ |
+| 10 | single | 100,000 | first page (≤100) | 7.70 | 7.79 | -0.09 | -1.2 % | 1 → 1 | ✓ |
+| 10 | many | 1,000 | first page (≤100) | 2.84 | 2.85 | -0.01 | -0.4 % | 1 → 1 | ✓ |
+| 10 | many | 10,000 | first page (≤100) | 3.25 | 3.29 | -0.04 | -1.2 % | 1 → 1 | ✓ |
+| 10 | many | 100,000 | first page (≤100) | 7.46 | 7.87 | -0.41 | -5.5 % | 1 → 1 | ✓ |
+
+### 2. Due-work sweep (`QueryDueAsync`)
+
+- **Before:** `SELECT TOP @max c.userId, c.articleId FROM c WHERE c.type = @type AND c.dueAt <= @now`, no request options
+- **After:** Same SQL, with `MaxItemCount = maxItems`
+- Cross-partition. Runs every 15 s in the worker (172,800 calls / month) with `maxItems = 100`. *Same result* = same number of due articles.
+
+| Partitions | Shape | Articles | Scenario | Before RU | After RU | Saved RU | Saved % | Partitions hit | Before RU / month | After RU / month | Same result |
+|---:|---|---:|---|---:|---:|---:|---:|:---:|---:|---:|:---:|
+| 1 | single | 1,000 | 0 due | 2.90 | 2.90 | 0.00 | 0.0 % | 1 → 1 | 501,120 | 501,120 | ✓ |
+| 1 | single | 1,000 | 1 due | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 487,296 | 487,296 | ✓ |
+| 1 | single | 1,000 | 100 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
+| 1 | single | 1,000 | 1,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
+| 1 | single | 10,000 | 0 due | 2.80 | 2.80 | 0.00 | 0.0 % | 1 → 1 | 483,840 | 483,840 | ✓ |
+| 1 | single | 10,000 | 1 due | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 487,296 | 487,296 | ✓ |
+| 1 | single | 10,000 | 1,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
+| 1 | single | 10,000 | 10,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
+| 1 | single | 100,000 | 0 due | 2.89 | 2.89 | 0.00 | 0.0 % | 1 → 1 | 499,392 | 499,392 | ✓ |
+| 1 | single | 100,000 | 1 due | 2.92 | 2.92 | 0.00 | 0.0 % | 1 → 1 | 504,576 | 504,576 | ✓ |
+| 1 | single | 100,000 | 10,000 due | 5.56 | 5.56 | 0.00 | 0.0 % | 1 → 1 | 960,768 | 960,768 | ✓ |
+| 1 | single | 100,000 | 100,000 due | 5.56 | 5.56 | 0.00 | 0.0 % | 1 → 1 | 960,768 | 960,768 | ✓ |
+| 1 | many | 1,000 | 0 due | 2.89 | 2.79 | 0.10 | 3.5 % | 1 → 1 | 499,392 | 482,112 | ✓ |
+| 1 | many | 1,000 | 1 due | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 487,296 | 487,296 | ✓ |
+| 1 | many | 1,000 | 100 due | 5.56 | 5.46 | 0.10 | 1.8 % | 1 → 1 | 960,768 | 943,488 | ✓ |
+| 1 | many | 1,000 | 1,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
+| 1 | many | 10,000 | 0 due | 2.79 | 2.89 | -0.10 | -3.6 % | 1 → 1 | 482,112 | 499,392 | ✓ |
+| 1 | many | 10,000 | 1 due | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 487,296 | 487,296 | ✓ |
+| 1 | many | 10,000 | 1,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
+| 1 | many | 10,000 | 10,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
+| 1 | many | 100,000 | 0 due | 2.79 | 2.79 | 0.00 | 0.0 % | 1 → 1 | 482,112 | 482,112 | ✓ |
+| 1 | many | 100,000 | 1 due | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 487,296 | 487,296 | ✓ |
+| 1 | many | 100,000 | 10,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
+| 1 | many | 100,000 | 100,000 due | 5.47 | 5.47 | 0.00 | 0.0 % | 1 → 1 | 945,216 | 945,216 | ✓ |
+| 5 | single | 1,000 | 0 due | 13.95 | 13.95 | 0.00 | 0.0 % | 5 → 5 | 2,410,560 | 2,410,560 | ✓ |
+| 5 | single | 1,000 | 1 due | 13.98 | 13.98 | 0.00 | 0.0 % | 5 → 5 | 2,415,744 | 2,415,744 | ✓ |
+| 5 | single | 1,000 | 100 due | 13.83 | 13.83 | 0.00 | 0.0 % | 4 → 4 | 2,389,824 | 2,389,824 | ✓ |
+| 5 | single | 1,000 | 1,000 due | 13.83 | 13.83 | 0.00 | 0.0 % | 4 → 4 | 2,389,824 | 2,389,824 | ✓ |
+| 5 | single | 10,000 | 0 due | 13.95 | 13.95 | 0.00 | 0.0 % | 5 → 5 | 2,410,560 | 2,410,560 | ✓ |
+| 5 | single | 10,000 | 1 due | 13.98 | 13.98 | 0.00 | 0.0 % | 5 → 5 | 2,415,744 | 2,415,744 | ✓ |
+| 5 | single | 10,000 | 1,000 due | 13.83 | 13.83 | 0.00 | 0.0 % | 4 → 4 | 2,389,824 | 2,389,824 | ✓ |
+| 5 | single | 10,000 | 10,000 due | 13.83 | 13.83 | 0.00 | 0.0 % | 4 → 4 | 2,389,824 | 2,389,824 | ✓ |
+| 5 | single | 100,000 | 0 due | 13.95 | 13.95 | 0.00 | 0.0 % | 5 → 5 | 2,410,560 | 2,410,560 | ✓ |
+| 5 | single | 100,000 | 1 due | 13.98 | 13.98 | 0.00 | 0.0 % | 5 → 5 | 2,415,744 | 2,415,744 | ✓ |
+| 5 | single | 100,000 | 10,000 due | 13.83 | 13.83 | 0.00 | 0.0 % | 4 → 4 | 2,389,824 | 2,389,824 | ✓ |
+| 5 | single | 100,000 | 100,000 due | 13.83 | 13.83 | 0.00 | 0.0 % | 4 → 4 | 2,389,824 | 2,389,824 | ✓ |
+| 5 | many | 1,000 | 0 due | 13.95 | 13.95 | 0.00 | 0.0 % | 5 → 5 | 2,410,560 | 2,410,560 | ✓ |
+| 5 | many | 1,000 | 1 due | 13.98 | 13.98 | 0.00 | 0.0 % | 5 → 5 | 2,415,744 | 2,415,744 | ✓ |
+| 5 | many | 1,000 | 100 due | 16.66 | 16.66 | 0.00 | 0.0 % | 5 → 5 | 2,878,848 | 2,878,848 | ✓ |
+| 5 | many | 1,000 | 1,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
+| 5 | many | 10,000 | 0 due | 13.95 | 13.95 | 0.00 | 0.0 % | 5 → 5 | 2,410,560 | 2,410,560 | ✓ |
+| 5 | many | 10,000 | 1 due | 13.98 | 13.98 | 0.00 | 0.0 % | 5 → 5 | 2,415,744 | 2,415,744 | ✓ |
+| 5 | many | 10,000 | 1,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
+| 5 | many | 10,000 | 10,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
+| 5 | many | 100,000 | 0 due | 13.95 | 13.95 | 0.00 | 0.0 % | 5 → 5 | 2,410,560 | 2,410,560 | ✓ |
+| 5 | many | 100,000 | 1 due | 13.98 | 13.98 | 0.00 | 0.0 % | 5 → 5 | 2,415,744 | 2,415,744 | ✓ |
+| 5 | many | 100,000 | 10,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
+| 5 | many | 100,000 | 100,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
+| 10 | single | 1,000 | 0 due | 27.90 | 27.90 | 0.00 | 0.0 % | 10 → 10 | 4,821,120 | 4,821,120 | ✓ |
+| 10 | single | 1,000 | 1 due | 27.93 | 27.93 | 0.00 | 0.0 % | 10 → 10 | 4,826,304 | 4,826,304 | ✓ |
+| 10 | single | 1,000 | 100 due | 22.20 | 22.20 | 0.00 | 0.0 % | 7 → 7 | 3,836,160 | 3,836,160 | ✓ |
+| 10 | single | 1,000 | 1,000 due | 22.20 | 22.20 | 0.00 | 0.0 % | 7 → 7 | 3,836,160 | 3,836,160 | ✓ |
+| 10 | single | 10,000 | 0 due | 27.90 | 27.90 | 0.00 | 0.0 % | 10 → 10 | 4,821,120 | 4,821,120 | ✓ |
+| 10 | single | 10,000 | 1 due | 27.93 | 27.93 | 0.00 | 0.0 % | 10 → 10 | 4,826,304 | 4,826,304 | ✓ |
+| 10 | single | 10,000 | 1,000 due | 22.20 | 22.20 | 0.00 | 0.0 % | 7 → 7 | 3,836,160 | 3,836,160 | ✓ |
+| 10 | single | 10,000 | 10,000 due | 22.20 | 22.20 | 0.00 | 0.0 % | 7 → 7 | 3,836,160 | 3,836,160 | ✓ |
+| 10 | single | 100,000 | 0 due | 27.90 | 27.90 | 0.00 | 0.0 % | 10 → 10 | 4,821,120 | 4,821,120 | ✓ |
+| 10 | single | 100,000 | 1 due | 27.93 | 27.93 | 0.00 | 0.0 % | 10 → 10 | 4,826,304 | 4,826,304 | ✓ |
+| 10 | single | 100,000 | 10,000 due | 22.20 | 22.20 | 0.00 | 0.0 % | 7 → 7 | 3,836,160 | 3,836,160 | ✓ |
+| 10 | single | 100,000 | 100,000 due | 22.20 | 22.20 | 0.00 | 0.0 % | 7 → 7 | 3,836,160 | 3,836,160 | ✓ |
+| 10 | many | 1,000 | 0 due | 27.90 | 27.90 | 0.00 | 0.0 % | 10 → 10 | 4,821,120 | 4,821,120 | ✓ |
+| 10 | many | 1,000 | 1 due | 27.93 | 27.93 | 0.00 | 0.0 % | 10 → 10 | 4,826,304 | 4,826,304 | ✓ |
+| 10 | many | 1,000 | 100 due | 30.65 | 30.65 | 0.00 | 0.0 % | 10 → 10 | 5,296,320 | 5,296,320 | ✓ |
+| 10 | many | 1,000 | 1,000 due | 10.68 | 10.68 | 0.00 | 0.0 % | 2 → 2 | 1,845,504 | 1,845,504 | ✓ |
+| 10 | many | 10,000 | 0 due | 27.90 | 27.90 | 0.00 | 0.0 % | 10 → 10 | 4,821,120 | 4,821,120 | ✓ |
+| 10 | many | 10,000 | 1 due | 27.93 | 27.93 | 0.00 | 0.0 % | 10 → 10 | 4,826,304 | 4,826,304 | ✓ |
+| 10 | many | 10,000 | 1,000 due | 10.68 | 10.68 | 0.00 | 0.0 % | 2 → 2 | 1,845,504 | 1,845,504 | ✓ |
+| 10 | many | 10,000 | 10,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
+| 10 | many | 100,000 | 0 due | 27.90 | 27.90 | 0.00 | 0.0 % | 10 → 10 | 4,821,120 | 4,821,120 | ✓ |
+| 10 | many | 100,000 | 1 due | 27.93 | 27.93 | 0.00 | 0.0 % | 10 → 10 | 4,826,304 | 4,826,304 | ✓ |
+| 10 | many | 100,000 | 10,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
+| 10 | many | 100,000 | 100,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
+
+### 3. Pending check for the scale-to-zero keep-alive (`CountPendingAsync` → `HasPendingAsync`)
+
+- **Before:** `SELECT VALUE COUNT(1) FROM c WHERE c.type = @type AND IS_DEFINED(c.dueAt)`
+- **After:** `SELECT TOP 1 VALUE 1 FROM c WHERE c.type = @type AND IS_DEFINED(c.dueAt)` with `MaxItemCount = 1`
+- Cross-partition. Runs once a minute while the worker is awake (43,200 calls / month). *Same result* = both agree whether anything is pending.
+
+| Partitions | Shape | Articles | Scenario | Before RU | After RU | Saved RU | Saved % | Partitions hit | Before RU / month | After RU / month | Same result |
+|---:|---|---:|---|---:|---:|---:|---:|:---:|---:|---:|:---:|
+| 1 | single | 1,000 | 0 pending | 2.80 | 2.80 | 0.00 | 0.0 % | 1 → 1 | 120,960 | 120,960 | ✓ |
+| 1 | single | 1,000 | 1 pending | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 121,824 | 121,824 | ✓ |
+| 1 | single | 1,000 | 100 pending | 3.00 | 2.82 | 0.18 | 6.0 % | 1 → 1 | 129,600 | 121,824 | ✓ |
+| 1 | single | 1,000 | 1,000 pending | 3.00 | 2.82 | 0.18 | 6.0 % | 1 → 1 | 129,600 | 121,824 | ✓ |
+| 1 | single | 10,000 | 0 pending | 2.80 | 2.80 | 0.00 | 0.0 % | 1 → 1 | 120,960 | 120,960 | ✓ |
+| 1 | single | 10,000 | 1 pending | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 121,824 | 121,824 | ✓ |
+| 1 | single | 10,000 | 1,000 pending | 3.00 | 2.82 | 0.18 | 6.0 % | 1 → 1 | 129,600 | 121,824 | ✓ |
+| 1 | single | 10,000 | 10,000 pending | 3.00 | 2.82 | 0.18 | 6.0 % | 1 → 1 | 129,600 | 121,824 | ✓ |
+| 1 | single | 100,000 | 0 pending | 2.80 | 2.80 | 0.00 | 0.0 % | 1 → 1 | 120,960 | 120,960 | ✓ |
+| 1 | single | 100,000 | 1 pending | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 121,824 | 121,824 | ✓ |
+| 1 | single | 100,000 | 10,000 pending | 3.00 | 2.82 | 0.18 | 6.0 % | 1 → 1 | 129,600 | 121,824 | ✓ |
+| 1 | single | 100,000 | 100,000 pending | 3.00 | 2.82 | 0.18 | 6.0 % | 1 → 1 | 129,600 | 121,824 | ✓ |
+| 1 | many | 1,000 | 0 pending | 2.80 | 2.79 | 0.01 | 0.4 % | 1 → 1 | 120,960 | 120,528 | ✓ |
+| 1 | many | 1,000 | 1 pending | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 121,824 | 121,824 | ✓ |
+| 1 | many | 1,000 | 100 pending | 2.99 | 2.82 | 0.17 | 5.7 % | 1 → 1 | 129,168 | 121,824 | ✓ |
+| 1 | many | 1,000 | 1,000 pending | 2.99 | 2.82 | 0.17 | 5.7 % | 1 → 1 | 129,168 | 121,824 | ✓ |
+| 1 | many | 10,000 | 0 pending | 2.80 | 2.79 | 0.01 | 0.4 % | 1 → 1 | 120,960 | 120,528 | ✓ |
+| 1 | many | 10,000 | 1 pending | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 121,824 | 121,824 | ✓ |
+| 1 | many | 10,000 | 1,000 pending | 2.99 | 2.82 | 0.17 | 5.7 % | 1 → 1 | 129,168 | 121,824 | ✓ |
+| 1 | many | 10,000 | 10,000 pending | 2.99 | 2.82 | 0.17 | 5.7 % | 1 → 1 | 129,168 | 121,824 | ✓ |
+| 1 | many | 100,000 | 0 pending | 2.80 | 2.79 | 0.01 | 0.4 % | 1 → 1 | 120,960 | 120,528 | ✓ |
+| 1 | many | 100,000 | 1 pending | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 121,824 | 121,824 | ✓ |
+| 1 | many | 100,000 | 10,000 pending | 2.99 | 2.82 | 0.17 | 5.7 % | 1 → 1 | 129,168 | 121,824 | ✓ |
+| 1 | many | 100,000 | 100,000 pending | 3.00 | 2.82 | 0.18 | 6.0 % | 1 → 1 | 129,600 | 121,824 | ✓ |
+| 5 | single | 1,000 | 0 pending | 14.00 | 13.95 | 0.05 | 0.4 % | 5 → 5 | 604,800 | 602,640 | ✓ |
+| 5 | single | 1,000 | 1 pending | 14.02 | 11.19 | 2.83 | 20.2 % | 5 → 4 | 605,664 | 483,408 | ✓ |
+| 5 | single | 1,000 | 100 pending | 14.19 | 11.19 | 3.00 | 21.1 % | 5 → 4 | 613,008 | 483,408 | ✓ |
+| 5 | single | 1,000 | 1,000 pending | 14.19 | 11.19 | 3.00 | 21.1 % | 5 → 4 | 613,008 | 483,408 | ✓ |
+| 5 | single | 10,000 | 0 pending | 14.00 | 13.95 | 0.05 | 0.4 % | 5 → 5 | 604,800 | 602,640 | ✓ |
+| 5 | single | 10,000 | 1 pending | 14.02 | 11.19 | 2.83 | 20.2 % | 5 → 4 | 605,664 | 483,408 | ✓ |
+| 5 | single | 10,000 | 1,000 pending | 14.19 | 11.19 | 3.00 | 21.1 % | 5 → 4 | 613,008 | 483,408 | ✓ |
+| 5 | single | 10,000 | 10,000 pending | 14.19 | 11.19 | 3.00 | 21.1 % | 5 → 4 | 613,008 | 483,408 | ✓ |
+| 5 | single | 100,000 | 0 pending | 14.00 | 13.95 | 0.05 | 0.4 % | 5 → 5 | 604,800 | 602,640 | ✓ |
+| 5 | single | 100,000 | 1 pending | 14.02 | 11.19 | 2.83 | 20.2 % | 5 → 4 | 605,664 | 483,408 | ✓ |
+| 5 | single | 100,000 | 10,000 pending | 14.19 | 11.19 | 3.00 | 21.1 % | 5 → 4 | 613,008 | 483,408 | ✓ |
+| 5 | single | 100,000 | 100,000 pending | 14.20 | 11.19 | 3.01 | 21.2 % | 5 → 4 | 613,440 | 483,408 | ✓ |
+| 5 | many | 1,000 | 0 pending | 14.00 | 13.95 | 0.05 | 0.4 % | 5 → 5 | 604,800 | 602,640 | ✓ |
+| 5 | many | 1,000 | 1 pending | 14.02 | 5.61 | 8.41 | 60.0 % | 5 → 2 | 605,664 | 242,352 | ✓ |
+| 5 | many | 1,000 | 100 pending | 14.95 | 2.82 | 12.13 | 81.1 % | 5 → 1 | 645,840 | 121,824 | ✓ |
+| 5 | many | 1,000 | 1,000 pending | 14.95 | 2.82 | 12.13 | 81.1 % | 5 → 1 | 645,840 | 121,824 | ✓ |
+| 5 | many | 10,000 | 0 pending | 14.00 | 13.95 | 0.05 | 0.4 % | 5 → 5 | 604,800 | 602,640 | ✓ |
+| 5 | many | 10,000 | 1 pending | 14.02 | 5.61 | 8.41 | 60.0 % | 5 → 2 | 605,664 | 242,352 | ✓ |
+| 5 | many | 10,000 | 1,000 pending | 14.95 | 2.82 | 12.13 | 81.1 % | 5 → 1 | 645,840 | 121,824 | ✓ |
+| 5 | many | 10,000 | 10,000 pending | 14.95 | 2.82 | 12.13 | 81.1 % | 5 → 1 | 645,840 | 121,824 | ✓ |
+| 5 | many | 100,000 | 0 pending | 14.00 | 13.95 | 0.05 | 0.4 % | 5 → 5 | 604,800 | 602,640 | ✓ |
+| 5 | many | 100,000 | 1 pending | 14.02 | 5.61 | 8.41 | 60.0 % | 5 → 2 | 605,664 | 242,352 | ✓ |
+| 5 | many | 100,000 | 10,000 pending | 14.95 | 2.82 | 12.13 | 81.1 % | 5 → 1 | 645,840 | 121,824 | ✓ |
+| 5 | many | 100,000 | 100,000 pending | 14.95 | 2.82 | 12.13 | 81.1 % | 5 → 1 | 645,840 | 121,824 | ✓ |
+| 10 | single | 1,000 | 0 pending | 28.00 | 27.90 | 0.10 | 0.4 % | 10 → 10 | 1,209,600 | 1,205,280 | ✓ |
+| 10 | single | 1,000 | 1 pending | 28.02 | 19.56 | 8.46 | 30.2 % | 10 → 7 | 1,210,464 | 844,992 | ✓ |
+| 10 | single | 1,000 | 100 pending | 28.19 | 19.56 | 8.63 | 30.6 % | 10 → 7 | 1,217,808 | 844,992 | ✓ |
+| 10 | single | 1,000 | 1,000 pending | 28.19 | 19.56 | 8.63 | 30.6 % | 10 → 7 | 1,217,808 | 844,992 | ✓ |
+| 10 | single | 10,000 | 0 pending | 28.00 | 27.90 | 0.10 | 0.4 % | 10 → 10 | 1,209,600 | 1,205,280 | ✓ |
+| 10 | single | 10,000 | 1 pending | 28.02 | 19.56 | 8.46 | 30.2 % | 10 → 7 | 1,210,464 | 844,992 | ✓ |
+| 10 | single | 10,000 | 1,000 pending | 28.19 | 19.56 | 8.63 | 30.6 % | 10 → 7 | 1,217,808 | 844,992 | ✓ |
+| 10 | single | 10,000 | 10,000 pending | 28.19 | 19.56 | 8.63 | 30.6 % | 10 → 7 | 1,217,808 | 844,992 | ✓ |
+| 10 | single | 100,000 | 0 pending | 28.00 | 27.90 | 0.10 | 0.4 % | 10 → 10 | 1,209,600 | 1,205,280 | ✓ |
+| 10 | single | 100,000 | 1 pending | 28.02 | 19.56 | 8.46 | 30.2 % | 10 → 7 | 1,210,464 | 844,992 | ✓ |
+| 10 | single | 100,000 | 10,000 pending | 28.19 | 19.56 | 8.63 | 30.6 % | 10 → 7 | 1,217,808 | 844,992 | ✓ |
+| 10 | single | 100,000 | 100,000 pending | 28.20 | 19.56 | 8.64 | 30.6 % | 10 → 7 | 1,218,240 | 844,992 | ✓ |
+| 10 | many | 1,000 | 0 pending | 28.00 | 27.90 | 0.10 | 0.4 % | 10 → 10 | 1,209,600 | 1,205,280 | ✓ |
+| 10 | many | 1,000 | 1 pending | 28.02 | 8.40 | 19.62 | 70.0 % | 10 → 3 | 1,210,464 | 362,880 | ✓ |
+| 10 | many | 1,000 | 100 pending | 29.90 | 2.82 | 27.08 | 90.6 % | 10 → 1 | 1,291,680 | 121,824 | ✓ |
+| 10 | many | 1,000 | 1,000 pending | 29.90 | 2.82 | 27.08 | 90.6 % | 10 → 1 | 1,291,680 | 121,824 | ✓ |
+| 10 | many | 10,000 | 0 pending | 28.00 | 27.90 | 0.10 | 0.4 % | 10 → 10 | 1,209,600 | 1,205,280 | ✓ |
+| 10 | many | 10,000 | 1 pending | 28.02 | 8.40 | 19.62 | 70.0 % | 10 → 3 | 1,210,464 | 362,880 | ✓ |
+| 10 | many | 10,000 | 1,000 pending | 29.90 | 2.82 | 27.08 | 90.6 % | 10 → 1 | 1,291,680 | 121,824 | ✓ |
+| 10 | many | 10,000 | 10,000 pending | 29.90 | 2.82 | 27.08 | 90.6 % | 10 → 1 | 1,291,680 | 121,824 | ✓ |
+| 10 | many | 100,000 | 0 pending | 28.00 | 27.90 | 0.10 | 0.4 % | 10 → 10 | 1,209,600 | 1,205,280 | ✓ |
+| 10 | many | 100,000 | 1 pending | 28.02 | 8.40 | 19.62 | 70.0 % | 10 → 3 | 1,210,464 | 362,880 | ✓ |
+| 10 | many | 100,000 | 10,000 pending | 29.90 | 2.82 | 27.08 | 90.6 % | 10 → 1 | 1,291,680 | 121,824 | ✓ |
+| 10 | many | 100,000 | 100,000 pending | 29.90 | 2.82 | 27.08 | 90.6 % | 10 → 1 | 1,291,680 | 121,824 | ✓ |
