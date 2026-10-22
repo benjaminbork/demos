@@ -267,7 +267,7 @@ The review's three query changes were measured against **real Azure Cosmos DB**,
 | **Queries** | Before = the round-1 versions, after = the round-2 versions from [`CosmosArticleStore.cs`](src/AudioBlog.Core/Data/CosmosArticleStore.cs); both are verbatim in [`scripts/ru-test.cs`](scripts/ru-test.cs) |
 | **Measurement** | Request charge (RU) reported by Cosmos DB, summed over all pages of a query; median of 5 runs after one warm-up run. *Partitions hit* comes from the per-partition server-side query metrics. *Same result* checks that before and after returned the same answer. |
 | **Script** | [`scripts/ru-test.cs`](scripts/ru-test.cs) (.NET 10 file-based app): `dotnet run scripts/ru-test.cs -- --endpoint <cosmos endpoint>` |
-| **Run** | 2026-10-21, about 35 minutes. `p1` + `p5` and `p10` ran as two parallel processes; both reports were merged. |
+| **Run** | 2026-10-21, about 35 minutes. `p1` + `p5` and `p10` ran as two parallel processes; both reports were merged. The `p1` + `p5` run was repeated after a timeout. Its **single** rows were measured right after deleting ~100,000 items, which inflated the list query's cost (23.63 → 10.56 RU at 1,000 articles), so the single rows come from the first run on empty containers. |
 | **Cost** | About $15 (two started hours at 96,000 RU/s); the account was deleted afterwards |
 | **Full results file** | [`docs/ru-results/ru-test-partitions-20261021.md`](docs/ru-results/ru-test-partitions-20261021.md) |
 
@@ -303,15 +303,15 @@ The review's three query changes were measured against **real Azure Cosmos DB**,
 
 | Partitions | Shape | Articles | Scenario | Before RU | After RU | Saved RU | Saved % | Partitions hit | Same result |
 |---:|---|---:|---|---:|---:|---:|---:|:---:|:---:|
-| 1 | single | 1,000 | first page (≤100) | 23.63 | 10.56 | 13.07 | 55.3 % | 1 → 1 | ✓ |
-| 1 | single | 10,000 | first page (≤100) | 8.45 | 9.99 | -1.54 | -18.2 % | 1 → 1 | ✓ |
-| 1 | single | 100,000 | first page (≤100) | 7.62 | 7.79 | -0.17 | -2.2 % | 1 → 1 | ✓ |
+| 1 | single | 1,000 | first page (≤100) | 7.60 | 7.77 | -0.17 | -2.2 % | 1 → 1 | ✓ |
+| 1 | single | 10,000 | first page (≤100) | 7.62 | 7.80 | -0.18 | -2.4 % | 1 → 1 | ✓ |
+| 1 | single | 100,000 | first page (≤100) | 7.62 | 7.78 | -0.16 | -2.1 % | 1 → 1 | ✓ |
 | 1 | many | 1,000 | first page (≤100) | 2.84 | 2.85 | -0.01 | -0.4 % | 1 → 1 | ✓ |
 | 1 | many | 10,000 | first page (≤100) | 3.25 | 3.29 | -0.04 | -1.2 % | 1 → 1 | ✓ |
 | 1 | many | 100,000 | first page (≤100) | 7.37 | 7.78 | -0.41 | -5.6 % | 1 → 1 | ✓ |
-| 5 | single | 1,000 | first page (≤100) | 23.63 | 10.21 | 13.42 | 56.8 % | 1 → 1 | ✓ |
-| 5 | single | 10,000 | first page (≤100) | 9.67 | 9.77 | -0.10 | -1.0 % | 1 → 1 | ✓ |
-| 5 | single | 100,000 | first page (≤100) | 7.62 | 7.78 | -0.16 | -2.1 % | 1 → 1 | ✓ |
+| 5 | single | 1,000 | first page (≤100) | 7.60 | 7.77 | -0.17 | -2.2 % | 1 → 1 | ✓ |
+| 5 | single | 10,000 | first page (≤100) | 7.59 | 7.95 | -0.36 | -4.7 % | 1 → 1 | ✓ |
+| 5 | single | 100,000 | first page (≤100) | 7.61 | 7.79 | -0.18 | -2.4 % | 1 → 1 | ✓ |
 | 5 | many | 1,000 | first page (≤100) | 2.94 | 2.85 | 0.09 | 3.1 % | 1 → 1 | ✓ |
 | 5 | many | 10,000 | first page (≤100) | 3.35 | 3.30 | 0.05 | 1.5 % | 1 → 1 | ✓ |
 | 5 | many | 100,000 | first page (≤100) | 7.46 | 7.87 | -0.41 | -5.5 % | 1 → 1 | ✓ |
@@ -330,18 +330,18 @@ The review's three query changes were measured against **real Azure Cosmos DB**,
 
 | Partitions | Shape | Articles | Scenario | Before RU | After RU | Saved RU | Saved % | Partitions hit | Before RU / month | After RU / month | Same result |
 |---:|---|---:|---|---:|---:|---:|---:|:---:|---:|---:|:---:|
-| 1 | single | 1,000 | 0 due | 2.90 | 2.90 | 0.00 | 0.0 % | 1 → 1 | 501,120 | 501,120 | ✓ |
+| 1 | single | 1,000 | 0 due | 2.79 | 2.79 | 0.00 | 0.0 % | 1 → 1 | 482,112 | 482,112 | ✓ |
 | 1 | single | 1,000 | 1 due | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 487,296 | 487,296 | ✓ |
 | 1 | single | 1,000 | 100 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
 | 1 | single | 1,000 | 1,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
-| 1 | single | 10,000 | 0 due | 2.80 | 2.80 | 0.00 | 0.0 % | 1 → 1 | 483,840 | 483,840 | ✓ |
+| 1 | single | 10,000 | 0 due | 2.79 | 2.79 | 0.00 | 0.0 % | 1 → 1 | 482,112 | 482,112 | ✓ |
 | 1 | single | 10,000 | 1 due | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 487,296 | 487,296 | ✓ |
 | 1 | single | 10,000 | 1,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
 | 1 | single | 10,000 | 10,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
-| 1 | single | 100,000 | 0 due | 2.89 | 2.89 | 0.00 | 0.0 % | 1 → 1 | 499,392 | 499,392 | ✓ |
-| 1 | single | 100,000 | 1 due | 2.92 | 2.92 | 0.00 | 0.0 % | 1 → 1 | 504,576 | 504,576 | ✓ |
-| 1 | single | 100,000 | 10,000 due | 5.56 | 5.56 | 0.00 | 0.0 % | 1 → 1 | 960,768 | 960,768 | ✓ |
-| 1 | single | 100,000 | 100,000 due | 5.56 | 5.56 | 0.00 | 0.0 % | 1 → 1 | 960,768 | 960,768 | ✓ |
+| 1 | single | 100,000 | 0 due | 2.79 | 2.79 | 0.00 | 0.0 % | 1 → 1 | 482,112 | 482,112 | ✓ |
+| 1 | single | 100,000 | 1 due | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 487,296 | 487,296 | ✓ |
+| 1 | single | 100,000 | 10,000 due | 5.46 | 5.46 | 0.00 | 0.0 % | 1 → 1 | 943,488 | 943,488 | ✓ |
+| 1 | single | 100,000 | 100,000 due | 5.56 | 5.66 | -0.10 | -1.8 % | 1 → 1 | 960,768 | 978,048 | ✓ |
 | 1 | many | 1,000 | 0 due | 2.89 | 2.79 | 0.10 | 3.5 % | 1 → 1 | 499,392 | 482,112 | ✓ |
 | 1 | many | 1,000 | 1 due | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 487,296 | 487,296 | ✓ |
 | 1 | many | 1,000 | 100 due | 5.56 | 5.46 | 0.10 | 1.8 % | 1 → 1 | 960,768 | 943,488 | ✓ |
@@ -411,18 +411,18 @@ The review's three query changes were measured against **real Azure Cosmos DB**,
 
 | Partitions | Shape | Articles | Scenario | Before RU | After RU | Saved RU | Saved % | Partitions hit | Before RU / month | After RU / month | Same result |
 |---:|---|---:|---|---:|---:|---:|---:|:---:|---:|---:|:---:|
-| 1 | single | 1,000 | 0 pending | 2.80 | 2.80 | 0.00 | 0.0 % | 1 → 1 | 120,960 | 120,960 | ✓ |
+| 1 | single | 1,000 | 0 pending | 2.80 | 2.79 | 0.01 | 0.4 % | 1 → 1 | 120,960 | 120,528 | ✓ |
 | 1 | single | 1,000 | 1 pending | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 121,824 | 121,824 | ✓ |
-| 1 | single | 1,000 | 100 pending | 3.00 | 2.82 | 0.18 | 6.0 % | 1 → 1 | 129,600 | 121,824 | ✓ |
-| 1 | single | 1,000 | 1,000 pending | 3.00 | 2.82 | 0.18 | 6.0 % | 1 → 1 | 129,600 | 121,824 | ✓ |
-| 1 | single | 10,000 | 0 pending | 2.80 | 2.80 | 0.00 | 0.0 % | 1 → 1 | 120,960 | 120,960 | ✓ |
+| 1 | single | 1,000 | 100 pending | 2.99 | 2.82 | 0.17 | 5.7 % | 1 → 1 | 129,168 | 121,824 | ✓ |
+| 1 | single | 1,000 | 1,000 pending | 2.99 | 2.82 | 0.17 | 5.7 % | 1 → 1 | 129,168 | 121,824 | ✓ |
+| 1 | single | 10,000 | 0 pending | 2.80 | 2.79 | 0.01 | 0.4 % | 1 → 1 | 120,960 | 120,528 | ✓ |
 | 1 | single | 10,000 | 1 pending | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 121,824 | 121,824 | ✓ |
-| 1 | single | 10,000 | 1,000 pending | 3.00 | 2.82 | 0.18 | 6.0 % | 1 → 1 | 129,600 | 121,824 | ✓ |
-| 1 | single | 10,000 | 10,000 pending | 3.00 | 2.82 | 0.18 | 6.0 % | 1 → 1 | 129,600 | 121,824 | ✓ |
-| 1 | single | 100,000 | 0 pending | 2.80 | 2.80 | 0.00 | 0.0 % | 1 → 1 | 120,960 | 120,960 | ✓ |
+| 1 | single | 10,000 | 1,000 pending | 2.99 | 2.82 | 0.17 | 5.7 % | 1 → 1 | 129,168 | 121,824 | ✓ |
+| 1 | single | 10,000 | 10,000 pending | 2.99 | 2.82 | 0.17 | 5.7 % | 1 → 1 | 129,168 | 121,824 | ✓ |
+| 1 | single | 100,000 | 0 pending | 2.80 | 2.79 | 0.01 | 0.4 % | 1 → 1 | 120,960 | 120,528 | ✓ |
 | 1 | single | 100,000 | 1 pending | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 121,824 | 121,824 | ✓ |
-| 1 | single | 100,000 | 10,000 pending | 3.00 | 2.82 | 0.18 | 6.0 % | 1 → 1 | 129,600 | 121,824 | ✓ |
-| 1 | single | 100,000 | 100,000 pending | 3.00 | 2.82 | 0.18 | 6.0 % | 1 → 1 | 129,600 | 121,824 | ✓ |
+| 1 | single | 100,000 | 10,000 pending | 2.99 | 2.82 | 0.17 | 5.7 % | 1 → 1 | 129,168 | 121,824 | ✓ |
+| 1 | single | 100,000 | 100,000 pending | 3.10 | 2.92 | 0.18 | 5.8 % | 1 → 1 | 133,920 | 126,144 | ✓ |
 | 1 | many | 1,000 | 0 pending | 2.80 | 2.79 | 0.01 | 0.4 % | 1 → 1 | 120,960 | 120,528 | ✓ |
 | 1 | many | 1,000 | 1 pending | 2.82 | 2.82 | 0.00 | 0.0 % | 1 → 1 | 121,824 | 121,824 | ✓ |
 | 1 | many | 1,000 | 100 pending | 2.99 | 2.82 | 0.17 | 5.7 % | 1 → 1 | 129,168 | 121,824 | ✓ |
