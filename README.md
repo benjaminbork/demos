@@ -102,6 +102,20 @@ azd auth login
 az login
 ```
 
+The demo lives in the resource group `rg-external-agent-demo` (azd would otherwise name it `rg-<env name>`):
+
+```bash
+azd env new linkagent --location swedencentral
+```
+
+```bash
+az group create -n rg-external-agent-demo -l swedencentral --tags azd-env-name=linkagent
+```
+
+```bash
+azd env set AZURE_RESOURCE_GROUP rg-external-agent-demo
+```
+
 ```bash
 azd up
 ```
@@ -120,10 +134,10 @@ azd env get-value AGENT_URL
 Or use the API:
 
 ```bash
-curl -sS -X POST "$(azd env get-value AGENT_URL)/chat" -H "Content-Type: application/json" -d '{"message": "Hi! What can you do?"}'
+curl -sS -X POST "$(azd env get-value AGENT_URL)/chat" -H "Content-Type: application/json" -d '{"message": "Translate into German: The weather is nice today."}'
 ```
 
-Continue the same chat with the `sessionId` from the response: `{"sessionId": "...", "message": "..."}`
+The chatbot replies with something like `Das Wetter ist heute schön.` Continue the same chat with the `sessionId` from the response: `{"sessionId": "...", "message": "..."}`
 
 ## See the agent in Foundry 👀
 
@@ -201,11 +215,11 @@ foundry-link-agent/
 
 ## Status 🧪
 
-Deployed with `azd up` to Sweden Central (Nov 20, 2026, azd 1.23, Bicep 0.48.1) and checked end to end. That run used the earlier names (agent `demo-chatbot`, account `ai-<env>-<suffix>`, project `link-agent`). The rename to `demo-agent` / `external-agent-demo` is not deployed yet, the chatbot itself is the same:
-- **Bicep:** `az bicep build` and `az bicep lint` pass with no warnings. All resources and the three role assignments deploy
-- **Model call:** the deployed agent answers through its managed identity (no keys), and a second message in the same session sees the first one
-- **Link:** the deployment script in [`agent-registration.bicep`](infra/modules/agent-registration.bicep) succeeds and the project returns the agent with `{"kind": "external", "otel_agent_id": "<agent name>"}`. Its temporary storage account and container are removed afterwards
-- **Traces:** Application Insights receives one `invoke_agent <agent name>` span per message with `gen_ai.agent.id = <agent name>`, plus `chat gpt-5.4-mini` below it
+Deployed with `azd up` to Sweden Central into `rg-external-agent-demo` (Nov 20, 2026, azd 1.23, Bicep 0.48.1) and checked end to end:
+- **Bicep:** `az bicep build` and `az bicep lint` pass with no warnings. All resources and the role assignments deploy
+- **Model call:** the deployed chatbot answers through its managed identity (no keys). `Translate into German: The weather is nice today.` → `Das Wetter ist heute schön.`, and a second message in the same session sees the first one
+- **Link:** the deployment script in [`agent-registration.bicep`](infra/modules/agent-registration.bicep) succeeds and the project `external-agent-demo` returns the agent `demo-agent` with `{"kind": "external", "otel_agent_id": "demo-agent"}`. Its temporary storage account and container are removed afterwards
+- **Traces:** Application Insights receives one `invoke_agent demo-agent` span per message with `gen_ai.agent.id = demo-agent`, plus `chat gpt-5.4-mini` below it with the token usage (50 in / 10 out for the example above)
 - **Not checked:** the agent's **Traces** tab in the Foundry portal itself (UI only). Both sides it joins, the registration and the spans, are verified above
 
 Found and fixed while deploying:
