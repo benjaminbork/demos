@@ -252,7 +252,7 @@ A fresh Claude Code session reviewed the baseline with the skill.
 
 ## Step 9: Measuring the RU effect of the review
 
-The review's three query changes were measured against **real Azure Cosmos DB**, before (round 1) and after (round 2). The local emulator can't be used for this: it doesn't report request charges and doesn't apply the indexing policy.
+The review's three query changes were measured against **real Azure Cosmos DB**, before (round 1) and after (round 2). The local vNext emulator can't be used for this. Its [feature table](https://learn.microsoft.com/azure/cosmos-db/emulator-linux#feature-support) lists Request Units as "not yet implemented", range and composite indexes as not yet available (a custom indexing policy is accepted but ignored), and throughput changes as not implemented, so containers with several physical partitions can't be built.
 
 ### Test setup
 
