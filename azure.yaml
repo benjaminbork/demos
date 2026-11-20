@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+#
+# Azure Developer CLI (azd) project file
+#   azd up    -> provision infra/main.bicep (Foundry, model, App Insights, App Service, RBAC
+#                and the external agent registration, see infra/modules/agent-registration.bicep)
+#                deploy src/ to App Service (Oryx installs requirements.txt)
+#   azd down  -> delete everything, the registration too (add --purge to also purge the Foundry account)
+name: foundry-link-agent
+metadata:
+  template: foundry-link-agent@0.0.1
+
+infra:
+  provider: bicep
+  path: infra
+  module: main
+
+services:
+  agent:
+    project: ./src
+    language: python
+    host: appservice # matched via the 'azd-service-name: agent' tag on the web app
