@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AudioBlog.Api/AudioBlog.Api.csproj" />
+    <Project Path="src/AudioBlog.Core/AudioBlog.Core.csproj" />
+    <Project Path="src/AudioBlog.Worker/AudioBlog.Worker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AudioBlog.Tests/AudioBlog.Tests.csproj" />
+  </Folder>
+</Solution>

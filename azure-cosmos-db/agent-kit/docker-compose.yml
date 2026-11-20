@@ -1,0 +1,32 @@
+# Local dependencies for Audio Blog.
+#   docker compose up -d
+# Cosmos DB emulator (vNext, Linux) on https://localhost:8081  (Data Explorer: http://localhost:1234)
+# Azurite (Blob Storage emulator)    on http://127.0.0.1:10000
+services:
+  cosmos:
+    image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-latest
+    # The .NET SDK cannot talk to the emulator over plain HTTP, so run it in HTTPS mode.
+    command: ["--protocol", "https", "--enable-telemetry", "false"]
+    ports:
+      - "8081:8081"   # gateway endpoint
+      - "8080:8080"   # health probe (/ready)
+      - "1234:1234"   # Data Explorer
+    volumes:
+      - cosmos-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/ready || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    command: ["azurite-blob", "--blobHost", "0.0.0.0", "--blobPort", "10000", "--location", "/data", "--skipApiVersionCheck"]
+    ports:
+      - "10000:10000"
+    volumes:
+      - azurite-data:/data
+
+volumes:
+  cosmos-data:
+  azurite-data:
