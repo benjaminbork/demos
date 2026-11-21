@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Demo chatbot</title>
+  <style>
+    :root { color-scheme: light dark; --bg: #f6f7f9; --card: #fff; --text: #1b1f24; --muted: #6a737d; --me: #0f6cbd; --bot: #e9ecef; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #15171a; --card: #1e2125; --text: #e6e8eb; --muted: #9aa1a9; --bot: #2a2e33; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 15px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    main { max-width: 680px; margin: 0 auto; padding: 24px 16px; display: flex; flex-direction: column; height: 100dvh; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    p.sub { margin: 0 0 16px; color: var(--muted); font-size: 13px; }
+    #log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 12px; background: var(--card); border-radius: 12px; }
+    .msg { max-width: 80%; padding: 8px 12px; border-radius: 12px; white-space: pre-wrap; }
+    .me { align-self: flex-end; background: var(--me); color: #fff; }
+    .bot { align-self: flex-start; background: var(--bot); }
+    .err { align-self: center; color: #d13438; font-size: 13px; }
+    form { display: flex; gap: 8px; margin-top: 12px; }
+    input { flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--muted); background: var(--card); color: var(--text); font: inherit; }
+    button { padding: 10px 16px; border: 0; border-radius: 10px; background: var(--me); color: #fff; font: inherit; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: default; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Demo chatbot</h1>
+  <p class="sub">Microsoft Agent Framework in App Service, linked to Microsoft Foundry. Every message shows up as a trace in Foundry.</p>
+  <div id="log" aria-live="polite"></div>
+  <form id="form">
+    <input id="input" placeholder="Say hi…" autocomplete="off" required>
+    <button id="send">Send</button>
+  </form>
+</main>
+<script>
+  const log = document.getElementById("log"), form = document.getElementById("form"),
+        input = document.getElementById("input"), send = document.getElementById("send");
+  let sessionId = null;
+
+  function add(text, cls) {
+    const div = document.createElement("div");
+    div.className = "msg " + cls;
+    div.textContent = text;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const message = input.value.trim();
+    if (!message) return;
+    add(message, "me");
+    input.value = "";
+    send.disabled = true;
+    try {
+      const res = await fetch("chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, sessionId }),
+      });
+      if (!res.ok) throw new Error(res.status + " " + (await res.text()));
+      const data = await res.json();
+      sessionId = data.sessionId;
+      add(data.reply, "bot");
+    } catch (err) {
+      add("Error: " + err.message, "err");
+    } finally {
+      send.disabled = false;
+      input.focus();
+    }
+  });
+</script>
+</body>
+</html>
